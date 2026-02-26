@@ -1158,6 +1158,34 @@ $(OBJ)/.vkd3d-proton-post-source:
 	echo "$(shell git -C $(SRCDIR) submodule status -- vkd3d-proton)" > $(DST_LIBDIR)/wine/vkd3d-proton/version
 	touch $@
 
+##
+## optiscaler
+##
+
+OPTISCALER_RUNTIME_DIR ?= $(OBJ)/optiscaler-runtime
+OPTISCALER_DIST_DIR := $(DST_LIBDIR)/wine/optiscaler/x86_64-windows
+OPTISCALER_VERSION := $(DST_LIBDIR)/wine/optiscaler/version
+
+.PHONY: optiscaler-dist
+optiscaler-dist:
+	@if [ ! -f "$(OPTISCALER_RUNTIME_DIR)/OptiScaler.dll" ]; then \
+		echo "ERROR: OptiScaler runtime is missing."; \
+		echo "Expected: $(OPTISCALER_RUNTIME_DIR)/OptiScaler.dll"; \
+		echo "Provide a payload directory with OPTISCALER_RUNTIME_DIR=/path/to/runtime"; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(OPTISCALER_RUNTIME_DIR)/OptiScaler.ini" ]; then \
+		echo "ERROR: OptiScaler runtime is missing OptiScaler.ini."; \
+		echo "Expected: $(OPTISCALER_RUNTIME_DIR)/OptiScaler.ini"; \
+		exit 1; \
+	fi
+	mkdir -p $(OPTISCALER_DIST_DIR)
+	rsync --delete -arx "$(OPTISCALER_RUNTIME_DIR)/" "$(OPTISCALER_DIST_DIR)/"
+	mkdir -p $(dir $(OPTISCALER_VERSION))
+	echo "$(shell git -C $(SRCDIR) submodule status -- optiscaler)" > $(OPTISCALER_VERSION)
+
+all-dist: optiscaler-dist
+
 
 ifneq ($(findstring aarch64,$(unix_ARCHS)),)
 ##

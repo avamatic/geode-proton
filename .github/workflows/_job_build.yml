@@ -8,8 +8,39 @@ on:
         type: string
 
 jobs:
+  optiscaler:
+    name: Build OptiScaler Runtime
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          submodules: false
+
+      - name: Init OptiScaler submodule
+        shell: bash
+        run: |
+          git submodule update --init --recursive optiscaler
+
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build OptiScaler (Release x64)
+        run: |
+          msbuild optiscaler/OptiScaler.sln /m /p:Configuration=Release /p:Platform=x64 /verbosity:minimal
+
+      - name: Upload OptiScaler runtime artifact
+        uses: actions/upload-artifact@v5
+        with:
+          name: optiscaler-runtime
+          path: optiscaler/x64/Release/a/**
+          compression-level: 0
+          if-no-files-found: error
+
   proton:
     name: Build ${{ inputs.name }}
+    needs: optiscaler
     runs-on: ubuntu-latest
     steps:
       - name: Cleanup disk space
@@ -59,6 +90,28 @@ jobs:
           patch -Np1 -i ./.github/patches/0001-build-strip-binaries-early.patch
           mkdir ./build
 
+      - name: Download OptiScaler runtime artifact
+        uses: actions/download-artifact@v6
+        with:
+          name: optiscaler-runtime
+          path: ./build/optiscaler-runtime
+
+      - name: Resolve OptiScaler runtime path
+        id: optiscaler-runtime
+        shell: bash
+        run: |
+          runtime_dll="$(find ./build/optiscaler-runtime -type f -name OptiScaler.dll -print -quit)"
+          if [ -z "$runtime_dll" ]; then
+            echo "OptiScaler.dll not found in downloaded artifact."
+            exit 1
+          fi
+          runtime_dir="$(dirname "$runtime_dll")"
+          if [ ! -f "$runtime_dir/OptiScaler.ini" ]; then
+            echo "OptiScaler.ini not found next to OptiScaler.dll in artifact payload."
+            exit 1
+          fi
+          echo "path=$runtime_dir" >> "$GITHUB_OUTPUT"
+
       - name: Configure
         working-directory: ./build
         run: |
@@ -67,7 +120,7 @@ jobs:
       - name: Make ${{ inputs.name }}
         working-directory: ./build
         run: |
-          make -j$(nproc) redist
+          make -j$(nproc) OPTISCALER_RUNTIME_DIR="${{ steps.optiscaler-runtime.outputs.path }}" redist
 
       - name: Save cache
         id: ccache-save
@@ -88,4 +141,3 @@ jobs:
         with:
           name: ${{ inputs.name }}.sha512sum
           path: ./build/${{ inputs.name }}.sha512sum
-

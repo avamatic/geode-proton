@@ -58,6 +58,14 @@ if "PROTON_ADD_CONFIG" in os.environ:
     except:
         pass
 
+OPTISCALER_ALLOWED_HOOKS = {"dxgi", "winmm", "version", "d3d12", "dbghelp", "wininet", "winhttp"}
+
+def normalize_optiscaler_hook_name(hook_name):
+    hook = "dxgi" if hook_name is None else str(hook_name).strip().lower()
+    if hook.endswith(".dll"):
+        hook = hook[:-4]
+    return hook
+
 def empty_directory(path):
     # Walk through the directory structure top-down (False)
     for root, dirs, files in os.walk(path, topdown=False):
@@ -1317,6 +1325,122 @@ class CompatData:
                                  track_file=tracked_files,
                                  link_debug=True)
 
+                # OptiScaler integration (x64 system32 only for v1)
+                g_session.optiscaler_active = False
+                optiscaler_hook = g_session.optiscaler_hook
+                optiscaler_enabled = g_session.optiscaler_enabled and optiscaler_hook in OPTISCALER_ALLOWED_HOOKS
+                optiscaler_system32 = "drive_c/windows/system32"
+                optiscaler_plugins = optiscaler_system32 + "/plugins"
+
+                def first_existing(paths):
+                    for path in paths:
+                        if file_exists(path, follow_symlinks=True):
+                            return path
+                    return None
+
+                def optiscaler_payload(name):
+                    return first_existing([
+                        g_proton.arch_pe_dir("wine/optiscaler", False) + name,
+                        g_proton.lib_dir + "wine/optiscaler/" + name,
+                        g_proton.dist_dir + "share/optiscaler/" + name,
+                        g_proton.dist_dir + "optiscaler/" + name,
+                    ])
+
+                def get_system_hook_source(hook_name):
+                    if hook_name == "dxgi":
+                        if use_dxvk_dxgi:
+                            return g_proton.arch_pe_dir("wine/dxvk", False) + "dxgi.dll"
+                        return g_proton.default_pfx_dir + "drive_c/windows/system32/dxgi.dll"
+                    if hook_name == "d3d12":
+                        if use_wined3d:
+                            return g_proton.default_pfx_dir + "drive_c/windows/system32/d3d12.dll"
+                        return g_proton.arch_pe_dir("wine/vkd3d-proton", False) + "d3d12.dll"
+                    return g_proton.default_pfx_dir + "drive_c/windows/system32/" + hook_name + ".dll"
+
+                def remove_file_from_prefix(relpath):
+                    dst = self.prefix_dir + relpath
+                    if file_exists(dst, follow_symlinks=False) and (os.path.isfile(dst) or os.path.islink(dst)):
+                        os.unlink(dst)
+
+                def restore_hook(hook_name):
+                    try_copy(get_system_hook_source(hook_name),
+                            optiscaler_system32 + "/" + hook_name + ".dll",
+                            prefix=self.prefix_dir,
+                            track_file=tracked_files,
+                            link_debug=True,
+                            optional=True)
+
+                def cleanup_optiscaler(selected_hook):
+                    for hook_name in OPTISCALER_ALLOWED_HOOKS:
+                        remove_file_from_prefix(optiscaler_plugins + "/" + hook_name + ".dll")
+                        if selected_hook is None or hook_name != selected_hook:
+                            restore_hook(hook_name)
+                    if selected_hook is None:
+                        remove_file_from_prefix(optiscaler_system32 + "/OptiScaler.ini")
+
+                def iter_optiscaler_support_dlls(optiscaler_dll_path):
+                    if optiscaler_dll_path is None:
+                        return
+                    payload_root = os.path.dirname(optiscaler_dll_path)
+                    for root, _, files in os.walk(payload_root):
+                        for file_name in files:
+                            if not file_name.lower().endswith(".dll"):
+                                continue
+                            dll_name = file_name[:-4].lower()
+                            if dll_name == "optiscaler" or dll_name in OPTISCALER_ALLOWED_HOOKS:
+                                continue
+                            src = os.path.join(root, file_name)
+                            rel = os.path.relpath(src, payload_root)
+                            yield src, rel
+
+                def stage_optiscaler_support_dlls(optiscaler_dll_path):
+                    for src, rel in iter_optiscaler_support_dlls(optiscaler_dll_path):
+                        try_copy(src, optiscaler_system32 + "/" + rel,
+                                prefix=self.prefix_dir, track_file=tracked_files, optional=True)
+
+                def remove_optiscaler_support_dlls(optiscaler_dll_path):
+                    for _, rel in iter_optiscaler_support_dlls(optiscaler_dll_path):
+                        remove_file_from_prefix(optiscaler_system32 + "/" + rel)
+
+                if optiscaler_enabled:
+                    optiscaler_dll = optiscaler_payload("OptiScaler.dll")
+                    optiscaler_ini = optiscaler_payload("OptiScaler.ini")
+
+                    if optiscaler_dll is None:
+                        log("OPTISCALER is enabled but OptiScaler.dll was not found in this Proton build; disabling for this run.")
+                        cleanup_optiscaler(None)
+                    else:
+                        cleanup_optiscaler(optiscaler_hook)
+
+                        try_copy(optiscaler_dll, optiscaler_system32 + "/" + optiscaler_hook + ".dll",
+                                prefix=self.prefix_dir, track_file=tracked_files)
+
+                        if optiscaler_ini is not None:
+                            try_copy(optiscaler_ini, optiscaler_system32 + "/OptiScaler.ini",
+                                    prefix=self.prefix_dir, track_file=tracked_files)
+                        else:
+                            log("OptiScaler.ini not found in payload; continuing with defaults.")
+
+                        stage_optiscaler_support_dlls(optiscaler_dll)
+
+                        makedirs(self.prefix_dir + optiscaler_plugins)
+                        chain_source = get_system_hook_source(optiscaler_hook)
+                        if optiscaler_hook == "dxgi":
+                            # Keep DXVK's dxgi in the plugin chain so OptiScaler can pass through cleanly.
+                            chain_source = get_system_hook_source("dxgi")
+
+                        if file_exists(chain_source, follow_symlinks=True):
+                            try_copy(chain_source, optiscaler_plugins + "/" + optiscaler_hook + ".dll",
+                                    prefix=self.prefix_dir, track_file=tracked_files, link_debug=True)
+                            g_session.optiscaler_active = True
+                        else:
+                            log("Unable to stage OptiScaler chain target for " + optiscaler_hook + ".dll; disabling for this run.")
+                            cleanup_optiscaler(None)
+                            remove_optiscaler_support_dlls(optiscaler_dll)
+                else:
+                    cleanup_optiscaler(None)
+                    remove_optiscaler_support_dlls(optiscaler_payload("OptiScaler.dll"))
+
             setup_game_dir_drive()
             setup_steam_dir_drive()
             setup_openvr_paths()
@@ -1637,6 +1761,9 @@ class Session:
 
         self.compat_config = default_compat_config()
         self.cmdlineappend = []
+        self.optiscaler_enabled = False
+        self.optiscaler_active = False
+        self.optiscaler_hook = "dxgi"
 
         if "STEAM_COMPAT_CONFIG" in os.environ:
             config = os.environ["STEAM_COMPAT_CONFIG"]
@@ -1893,6 +2020,15 @@ class Session:
         self.check_environment("PROTON_USE_HDR", "hdr")
         self.check_environment("PROTON_NO_NTSYNC", "nontsync")
         self.check_environment("PROTON_USE_WRITECOPY", "writecopy")
+        self.check_environment("OPTISCALER", "optiscaler")
+
+        self.optiscaler_enabled = "optiscaler" in self.compat_config
+        self.optiscaler_active = False
+        self.optiscaler_hook = normalize_optiscaler_hook_name(self.env.get("OPTISCALER_DLL_NAME", "dxgi"))
+        if self.optiscaler_enabled and self.optiscaler_hook not in OPTISCALER_ALLOWED_HOOKS:
+            log("Invalid OPTISCALER_DLL_NAME value '" + self.optiscaler_hook + "', disabling OptiScaler for this run.")
+            self.compat_config.discard("optiscaler")
+            self.optiscaler_enabled = False
 
         if "PROTON_ADD_CONFIG" in self.env:
             for c in proton_config:
@@ -2250,6 +2386,9 @@ class Session:
                     "2963870",
                 ]:
                 self.env["PROTON_LIMIT_ADDRESS_SPACE"] = "1"
+
+        if self.optiscaler_active:
+            self.dlloverrides[self.optiscaler_hook] = "n,b"
 
         s = ""
         for dll in self.dlloverrides:

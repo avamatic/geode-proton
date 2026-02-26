@@ -105,7 +105,7 @@ jobs:
             echo "OptiScaler.dll not found in downloaded artifact."
             exit 1
           fi
-          runtime_dir="$(dirname "$runtime_dll")"
+          runtime_dir="$(realpath "$(dirname "$runtime_dll")")"
           if [ ! -f "$runtime_dir/OptiScaler.ini" ]; then
             echo "OptiScaler.ini not found next to OptiScaler.dll in artifact payload."
             exit 1

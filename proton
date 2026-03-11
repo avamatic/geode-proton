@@ -1143,6 +1143,7 @@ class CompatData:
                 builtin_dll_copy,
                 str(use_nvapi),
                 str(use_dxvk_d3d8),
+                str(g_session.optiscaler_proxy or ""),
             ))
 
             # check whether any prefix config has changed
@@ -1317,6 +1318,51 @@ class CompatData:
                                  prefix=self.prefix_dir,
                                  track_file=tracked_files,
                                  link_debug=True)
+
+                # OptiScaler: deploy cross-vendor upscaling if enabled
+                if "optiscaler" in g_session.compat_config and g_session.optiscaler_proxy:
+                    optiscaler_dir = g_proton.lib_dir + "wine/optiscaler/"
+                    optiscaler_pe_dir = optiscaler_dir + "x86_64-windows/"
+                    proxy_name = g_session.optiscaler_proxy
+
+                    # Copy OptiScaler.dll as the proxy DLL name
+                    try_copy(optiscaler_pe_dir + "OptiScaler.dll",
+                            "drive_c/windows/system32/" + proxy_name + ".dll",
+                            prefix=self.prefix_dir, track_file=tracked_files, link_debug=True)
+
+                    # Copy supporting DLLs to system32
+                    optiscaler_support_dlls = [
+                        "amd_fidelityfx_dx12.dll",
+                        "amd_fidelityfx_upscaler_dx12.dll",
+                        "amd_fidelityfx_framegeneration_dx12.dll",
+                        "amd_fidelityfx_vk.dll",
+                        "libxess.dll",
+                        "libxess_dx11.dll",
+                        "libxess_fg.dll",
+                        "libxell.dll",
+                        "dlssg_to_fsr3_amd_is_better.dll",
+                    ]
+                    for dll in optiscaler_support_dlls:
+                        try_copy(optiscaler_pe_dir + dll,
+                                "drive_c/windows/system32",
+                                optional=True,
+                                prefix=self.prefix_dir, track_file=tracked_files, link_debug=True)
+
+                    # Copy OptiPatcher plugin
+                    makedirs(self.prefix_dir + "/drive_c/windows/system32/plugins")
+                    try_copy(optiscaler_pe_dir + "plugins/OptiPatcher.asi",
+                            "drive_c/windows/system32/plugins/OptiPatcher.asi",
+                            optional=True,
+                            prefix=self.prefix_dir, track_file=tracked_files, link_debug=True)
+
+                    # Copy OptiScaler.ini config
+                    try_copy(optiscaler_dir + "OptiScaler.ini",
+                            "drive_c/windows/system32/OptiScaler.ini",
+                            optional=True,
+                            prefix=self.prefix_dir, track_file=tracked_files, link_debug=True)
+
+                    # Set DLL override for the proxy name
+                    g_session.dlloverrides[proxy_name] = "n"
 
             setup_game_dir_drive()
             setup_steam_dir_drive()
@@ -1894,6 +1940,23 @@ class Session:
         self.check_environment("PROTON_USE_HDR", "hdr")
         self.check_environment("PROTON_NO_NTSYNC", "nontsync")
         self.check_environment("PROTON_USE_WRITECOPY", "writecopy")
+
+        # OptiScaler: opt-in cross-vendor upscaling (DLSS/FSR/XeSS)
+        # PROTON_USE_OPTISCALER=1 (default proxy=version) or =version|winmm|winhttp|wininet|dbghelp|d3d12
+        if "PROTON_USE_OPTISCALER" in self.env and nonzero(self.env["PROTON_USE_OPTISCALER"]):
+            self.compat_config.add("optiscaler")
+            optiscaler_value = self.env["PROTON_USE_OPTISCALER"].strip().lower()
+            valid_proxy_names = {"version", "winmm", "winhttp", "wininet", "dbghelp", "d3d12"}
+            if optiscaler_value in valid_proxy_names:
+                self.optiscaler_proxy = optiscaler_value
+            elif optiscaler_value == "1" or optiscaler_value == "true":
+                self.optiscaler_proxy = "version"
+            else:
+                log("Warning: Invalid PROTON_USE_OPTISCALER value '" + self.env["PROTON_USE_OPTISCALER"] + "', disabling OptiScaler")
+                self.compat_config.discard("optiscaler")
+                self.optiscaler_proxy = None
+        else:
+            self.optiscaler_proxy = None
 
         if "PROTON_ADD_CONFIG" in self.env:
             for c in proton_config:

@@ -34,9 +34,13 @@ jobs:
         echo "full_desc=$(git describe --long --tags)" >> $GITHUB_OUTPUT
         echo "branch=${GITHUB_HEAD_REF:-${GITHUB_REF#refs/heads/}}" >> $GITHUB_OUTPUT
 
+  optiscaler:
+    name: Build OptiScaler
+    uses: ./.github/workflows/_job_build_optiscaler.yml
+
   build:
     name: Build
-    needs: version
+    needs: [version, optiscaler]
     uses: ./.github/workflows/_job_build.yml
     with:
       name: ${{ needs.version.outputs.full_desc }}-${{ needs.version.outputs.branch }}

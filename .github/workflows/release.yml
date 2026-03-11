@@ -12,8 +12,13 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  optiscaler:
+    name: Build OptiScaler
+    uses: ./.github/workflows/_job_build_optiscaler.yml
+
   build:
     name: Build
+    needs: optiscaler
     uses: ./.github/workflows/_job_build.yml
     with:
       name: ${{ github.ref_name }}

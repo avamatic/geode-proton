@@ -50,6 +50,12 @@ jobs:
           fetch-tags: true
           submodules: false
 
+      - name: Download OptiScaler artifact
+        uses: actions/download-artifact@v5
+        with:
+          name: optiscaler-dist.tar.gz
+          path: ./optiscaler-artifact
+
       - name: Patch
         run: |
           git submodule update --init --filter=tree:0 --recursive
@@ -68,6 +74,26 @@ jobs:
         working-directory: ./build
         run: |
           make -j$(nproc) redist
+
+      - name: Install OptiScaler into distribution
+        run: |
+          # Find the redist directory
+          REDIST_DIR=$(find ./build -maxdepth 1 -name "redist" -type d | head -1)
+          if [ -z "$REDIST_DIR" ]; then
+            REDIST_DIR="./build/redist"
+          fi
+          # Find the proton files directory within redist
+          PROTON_FILES=$(find $REDIST_DIR -path "*/files/lib/wine" -type d | head -1)
+          if [ -z "$PROTON_FILES" ]; then
+            echo "Warning: Could not find files/lib/wine in redist, using fallback path"
+            PROTON_FILES="$REDIST_DIR/files/lib/wine"
+          fi
+          OPTISCALER_DIR="$PROTON_FILES/optiscaler"
+          mkdir -p "$OPTISCALER_DIR"
+          tar -xzf ./optiscaler-artifact/optiscaler-dist.tar.gz -C "$OPTISCALER_DIR"
+          echo "OptiScaler installed to $OPTISCALER_DIR"
+          ls -la "$OPTISCALER_DIR"
+          ls -la "$OPTISCALER_DIR/x86_64-windows/" || true
 
       - name: Save cache
         id: ccache-save

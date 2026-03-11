@@ -106,3 +106,9 @@
 [submodule "meson"]
 	path = meson
 	url = https://github.com/mesonbuild/meson.git
+[submodule "OptiScaler"]
+	path = OptiScaler
+	url = https://github.com/optiscaler/OptiScaler
+[submodule "OptiPatcher"]
+	path = OptiPatcher
+	url = https://github.com/optiscaler/OptiPatcher

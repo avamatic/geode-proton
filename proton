@@ -1319,18 +1319,75 @@ class CompatData:
                                  track_file=tracked_files,
                                  link_debug=True)
 
-                # OptiScaler: deploy cross-vendor upscaling if enabled
+                # OptiScaler: deploy cross-vendor upscaling to game directory
+                # Files go in the game dir (like goverlay) so only the game process
+                # loads them — Wine system processes in system32 are unaffected.
+                # A manifest in the prefix tracks deployed files for cleanup.
                 if "optiscaler" in g_session.compat_config and g_session.optiscaler_proxy:
                     optiscaler_dir = g_proton.lib_dir + "wine/optiscaler/"
                     optiscaler_pe_dir = optiscaler_dir + "x86_64-windows/"
                     proxy_name = g_session.optiscaler_proxy
 
-                    # Copy OptiScaler.dll as the proxy DLL name
-                    try_copy(optiscaler_pe_dir + "OptiScaler.dll",
-                            "drive_c/windows/system32/" + proxy_name + ".dll",
-                            prefix=self.prefix_dir, track_file=tracked_files, link_debug=True)
+                    # Determine the actual game exe directory. The Steam launch
+                    # command often points to a launcher (e.g. REDprelauncher.exe)
+                    # in the game root, but the real game exe lives in a subdirectory.
+                    game_root = os.environ.get("STEAM_COMPAT_INSTALL_PATH",
+                                               os.path.dirname(os.path.abspath(sys.argv[2])))
+                    game_exe_dir = os.path.dirname(os.path.abspath(sys.argv[2]))
+                    optiscaler_manifest = os.path.join(self.prefix_dir, "optiscaler_files")
 
-                    # Copy supporting DLLs to system32
+                    # Unreal Engine heuristic: if the game root has an Engine/
+                    # directory, find the shipping exe in **/Binaries/Win64/
+                    if os.path.isdir(os.path.join(game_root, "Engine")):
+                        import glob
+                        # Search for shipping exes — try non-Engine paths first
+                        ue_exes = glob.glob(os.path.join(game_root, "*", "Binaries", "Win64", "*.exe"))
+                        if not ue_exes:
+                            ue_exes = glob.glob(os.path.join(game_root, "*", "*", "Binaries", "Win64", "*.exe"))
+                        ue_exes_filtered = [e for e in ue_exes if "/Engine/" not in e and "\\Engine\\" not in e]
+                        # Some games (Satisfactory) have the shipping exe under Engine/
+                        if not ue_exes_filtered:
+                            ue_exes_filtered = glob.glob(os.path.join(game_root, "Engine", "Binaries", "Win64", "*-Shipping.exe"))
+                        if not ue_exes_filtered:
+                            ue_exes_filtered = ue_exes
+                        if ue_exes_filtered:
+                            game_exe_dir = os.path.dirname(ue_exes_filtered[0])
+                            log("OptiScaler: UE game detected, deploying to " + game_exe_dir)
+
+                    # Known launcher rewrites for non-UE games
+                    launcher_exe = os.path.basename(sys.argv[2]).lower()
+                    if launcher_exe == "redprelauncher.exe":
+                        # CD Projekt RED games (Cyberpunk 2077, Witcher 3)
+                        for subdir in ["bin/x64_dx12", "bin/x64"]:
+                            candidate = os.path.join(game_root, subdir)
+                            if os.path.isdir(candidate):
+                                game_exe_dir = candidate
+                                log("OptiScaler: REDengine game, deploying to " + game_exe_dir)
+                                break
+                    elif launcher_exe in ("idtechlauncher.exe",):
+                        # id Tech games (Doom Eternal) — launcher is in subdirectory,
+                        # game exe is in the root
+                        game_exe_dir = game_root
+                        log("OptiScaler: id Tech game, deploying to " + game_exe_dir)
+
+                    log("OptiScaler: target directory: " + game_exe_dir)
+
+                    # Clean up any previously deployed OptiScaler files
+                    if os.path.exists(optiscaler_manifest):
+                        with open(optiscaler_manifest, "r") as f:
+                            for line in f:
+                                p = line.strip()
+                                if p and os.path.isfile(p):
+                                    os.remove(p)
+                                    log("OptiScaler: removed " + p)
+                                elif p and os.path.isdir(p):
+                                    try:
+                                        os.rmdir(p)
+                                    except OSError:
+                                        pass
+
+                    deployed_files = []
+
                     optiscaler_support_dlls = [
                         "amd_fidelityfx_dx12.dll",
                         "amd_fidelityfx_upscaler_dx12.dll",
@@ -1342,27 +1399,60 @@ class CompatData:
                         "libxell.dll",
                         "dlssg_to_fsr3_amd_is_better.dll",
                     ]
+
+                    # Copy OptiScaler.dll as the proxy DLL name
+                    dst = os.path.join(game_exe_dir, proxy_name + ".dll")
+                    try_copy(optiscaler_pe_dir + "OptiScaler.dll", dst)
+                    deployed_files.append(dst)
+
+                    # Copy supporting DLLs
                     for dll in optiscaler_support_dlls:
-                        try_copy(optiscaler_pe_dir + dll,
-                                "drive_c/windows/system32",
-                                optional=True,
-                                prefix=self.prefix_dir, track_file=tracked_files, link_debug=True)
+                        src = optiscaler_pe_dir + dll
+                        dst = os.path.join(game_exe_dir, dll)
+                        if os.path.exists(src):
+                            try_copy(src, dst)
+                            deployed_files.append(dst)
 
                     # Copy OptiPatcher plugin
-                    makedirs(self.prefix_dir + "/drive_c/windows/system32/plugins")
-                    try_copy(optiscaler_pe_dir + "plugins/OptiPatcher.asi",
-                            "drive_c/windows/system32/plugins/OptiPatcher.asi",
-                            optional=True,
-                            prefix=self.prefix_dir, track_file=tracked_files, link_debug=True)
+                    plugins_dir = os.path.join(game_exe_dir, "plugins")
+                    makedirs(plugins_dir)
+                    deployed_files.append(plugins_dir)
+                    patcher_src = optiscaler_pe_dir + "plugins/OptiPatcher.asi"
+                    patcher_dst = os.path.join(plugins_dir, "OptiPatcher.asi")
+                    if os.path.exists(patcher_src):
+                        try_copy(patcher_src, patcher_dst)
+                        deployed_files.append(patcher_dst)
 
                     # Copy OptiScaler.ini config
-                    try_copy(optiscaler_dir + "OptiScaler.ini",
-                            "drive_c/windows/system32/OptiScaler.ini",
-                            optional=True,
-                            prefix=self.prefix_dir, track_file=tracked_files, link_debug=True)
+                    ini_src = optiscaler_dir + "OptiScaler.ini"
+                    ini_dst = os.path.join(game_exe_dir, "OptiScaler.ini")
+                    if os.path.exists(ini_src):
+                        try_copy(ini_src, ini_dst)
+                        deployed_files.append(ini_dst)
 
-                    # Set DLL override for the proxy name
-                    g_session.dlloverrides[proxy_name] = "n"
+                    # Write manifest for cleanup (files first, dirs last)
+                    with open(optiscaler_manifest, "w") as f:
+                        for p in deployed_files:
+                            f.write(p + "\n")
+
+                    # Set DLL override so game loads our native DLL from game dir
+                    g_session.dlloverrides[proxy_name] = "n,b"
+                else:
+                    # OptiScaler not enabled — clean up any previously deployed files
+                    optiscaler_manifest = os.path.join(self.prefix_dir, "optiscaler_files")
+                    if os.path.exists(optiscaler_manifest):
+                        with open(optiscaler_manifest, "r") as f:
+                            for line in f:
+                                p = line.strip()
+                                if p and os.path.isfile(p):
+                                    os.remove(p)
+                                    log("OptiScaler: cleaned up " + p)
+                                elif p and os.path.isdir(p):
+                                    try:
+                                        os.rmdir(p)
+                                    except OSError:
+                                        pass
+                        os.remove(optiscaler_manifest)
 
             setup_game_dir_drive()
             setup_steam_dir_drive()
@@ -1942,15 +2032,15 @@ class Session:
         self.check_environment("PROTON_USE_WRITECOPY", "writecopy")
 
         # OptiScaler: opt-in cross-vendor upscaling (DLSS/FSR/XeSS)
-        # PROTON_USE_OPTISCALER=1 (default proxy=version) or =version|winmm|winhttp|wininet|dbghelp|d3d12
+        # PROTON_USE_OPTISCALER=1 (default proxy=dxgi) or =dxgi|version|winmm|winhttp|wininet|dbghelp|d3d12
         if "PROTON_USE_OPTISCALER" in self.env and nonzero(self.env["PROTON_USE_OPTISCALER"]):
             self.compat_config.add("optiscaler")
             optiscaler_value = self.env["PROTON_USE_OPTISCALER"].strip().lower()
-            valid_proxy_names = {"version", "winmm", "winhttp", "wininet", "dbghelp", "d3d12"}
+            valid_proxy_names = {"dxgi", "version", "winmm", "winhttp", "wininet", "dbghelp", "d3d12"}
             if optiscaler_value in valid_proxy_names:
                 self.optiscaler_proxy = optiscaler_value
             elif optiscaler_value == "1" or optiscaler_value == "true":
-                self.optiscaler_proxy = "version"
+                self.optiscaler_proxy = "dxgi"
             else:
                 log("Warning: Invalid PROTON_USE_OPTISCALER value '" + self.env["PROTON_USE_OPTISCALER"] + "', disabling OptiScaler")
                 self.compat_config.discard("optiscaler")

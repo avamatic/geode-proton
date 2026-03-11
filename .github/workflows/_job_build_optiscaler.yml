@@ -5,109 +5,92 @@ on:
 
 jobs:
   optiscaler:
-    name: Build OptiScaler
-    runs-on: windows-latest
+    name: Package OptiScaler
+    runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          submodules: false
-
-      - name: Initialize OptiScaler submodule
-        shell: bash
+      - name: Download OptiScaler edge build
         run: |
-          git submodule update --init --recursive OptiScaler
-          git submodule update --init --recursive OptiPatcher
-
-      - name: Add MSBuild to PATH
-        uses: microsoft/setup-msbuild@v2
-
-      - name: Build OptiScaler
-        shell: cmd
-        run: msbuild /m /p:Configuration=Release OptiScaler\OptiScaler.sln /verbosity:minimal
-
-      - name: Build OptiPatcher
-        shell: cmd
-        run: msbuild /m /p:Configuration=Release OptiPatcher\OptiPatcher.sln /verbosity:minimal
-
-      - name: Download dlssg-to-fsr3
-        shell: pwsh
-        run: |
-          $release = Invoke-RestMethod -Uri "https://api.github.com/repos/Nukem9/dlssg-to-fsr3/releases/latest"
-          $asset = $release.assets | Where-Object { $_.name -match '\.zip$' } | Select-Object -First 1
-          if (-not $asset) {
-            Write-Error "No zip asset found in dlssg-to-fsr3 latest release"
+          # Get the latest edge tag from OptiScaler-builds
+          TAGS_JSON=$(curl -sf https://api.github.com/repos/benjamimgois/OptiScaler-builds/tags)
+          EDGE_TAG=$(echo "$TAGS_JSON" | jq -r '[.[] | select(.name | startswith("edge-"))][0].name')
+          if [ -z "$EDGE_TAG" ] || [ "$EDGE_TAG" = "null" ]; then
+            echo "Error: Could not find edge tag"
             exit 1
-          }
-          Write-Output "Downloading $($asset.name) from $($asset.browser_download_url)"
-          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "dlssg-to-fsr3.zip"
-          Expand-Archive -Path "dlssg-to-fsr3.zip" -DestinationPath "dlssg-to-fsr3-extracted"
-          # Find the DLL in the extracted archive
-          $dll = Get-ChildItem -Path "dlssg-to-fsr3-extracted" -Recurse -Filter "dlssg_to_fsr3_amd_is_better.dll" | Select-Object -First 1
-          if (-not $dll) {
-            Write-Error "dlssg_to_fsr3_amd_is_better.dll not found in archive"
-            exit 1
-          }
-          Copy-Item $dll.FullName -Destination "dlssg_to_fsr3_amd_is_better.dll"
-          Write-Output "dlssg_to_fsr3_amd_is_better.dll extracted successfully"
+          fi
+          echo "Found edge tag: $EDGE_TAG"
+          echo "EDGE_TAG=$EDGE_TAG" >> $GITHUB_ENV
 
-      - name: Package OptiScaler distribution
-        shell: pwsh
+          DOWNLOAD_URL="https://github.com/benjamimgois/OptiScaler-builds/releases/download/${EDGE_TAG}/optiscaler-edge.7z"
+          echo "Downloading from: $DOWNLOAD_URL"
+          curl -sfL -o optiscaler-edge.7z "$DOWNLOAD_URL"
+
+      - name: Extract and repackage
         run: |
-          $dist = "optiscaler-dist"
-          $windir = "$dist/x86_64-windows"
-          $plugins = "$windir/plugins"
+          sudo apt-get install -y p7zip-full
 
-          New-Item -ItemType Directory -Force -Path $windir
-          New-Item -ItemType Directory -Force -Path $plugins
-          New-Item -ItemType Directory -Force -Path "$dist/Licenses"
+          mkdir -p extracted
+          7z x -oextracted optiscaler-edge.7z
 
-          # OptiScaler.dll and config (from post-build output)
-          Copy-Item "OptiScaler/x64/Release/a/OptiScaler.dll" -Destination $windir
-          Copy-Item "OptiScaler/x64/Release/a/OptiScaler.ini" -Destination $dist
+          echo "Extracted contents:"
+          find extracted -type f | sort
 
-          # Supporting DLLs from OptiScaler build output
-          $supportDlls = @(
-            "libxess.dll",
-            "libxess_dx11.dll",
-            "libxess_fg.dll",
-            "libxell.dll",
-            "amd_fidelityfx_dx12.dll",
-            "amd_fidelityfx_upscaler_dx12.dll",
-            "amd_fidelityfx_framegeneration_dx12.dll",
-            "amd_fidelityfx_vk.dll"
-          )
-          foreach ($dll in $supportDlls) {
-            $src = "OptiScaler/x64/Release/a/$dll"
-            if (Test-Path $src) {
-              Copy-Item $src -Destination $windir
-            } else {
-              Write-Warning "Supporting DLL not found: $dll"
-            }
-          }
+          # Repackage into our distribution layout
+          DIST="optiscaler-dist"
+          WINDIR="$DIST/x86_64-windows"
+          PLUGINS="$WINDIR/plugins"
 
-          # Nukem FG mod
-          Copy-Item "dlssg_to_fsr3_amd_is_better.dll" -Destination $windir
+          mkdir -p "$WINDIR" "$PLUGINS" "$DIST/Licenses"
 
-          # OptiPatcher
-          Copy-Item "OptiPatcher/x64/Release/OptiPatcher.asi" -Destination $plugins
+          # Core DLL
+          cp extracted/OptiScaler.dll "$WINDIR/"
+
+          # Config
+          cp extracted/OptiScaler.ini "$DIST/"
+
+          # Supporting DLLs
+          for dll in \
+            amd_fidelityfx_dx12.dll \
+            amd_fidelityfx_upscaler_dx12.dll \
+            amd_fidelityfx_framegeneration_dx12.dll \
+            amd_fidelityfx_vk.dll \
+            libxess.dll \
+            libxess_dx11.dll \
+            libxess_fg.dll \
+            libxell.dll \
+            dlssg_to_fsr3_amd_is_better.dll \
+          ; do
+            if [ -f "extracted/$dll" ]; then
+              cp "extracted/$dll" "$WINDIR/"
+              echo "Copied: $dll"
+            else
+              echo "Warning: $dll not found in archive"
+            fi
+          done
+
+          # OptiPatcher plugin (may have version suffix)
+          OPTIPATCHER=$(find extracted/plugins -name "OptiPatcher*.asi" 2>/dev/null | head -1)
+          if [ -n "$OPTIPATCHER" ]; then
+            cp "$OPTIPATCHER" "$PLUGINS/OptiPatcher.asi"
+            echo "Copied OptiPatcher: $OPTIPATCHER"
+          else
+            echo "Warning: OptiPatcher.asi not found"
+          fi
 
           # Licenses
-          if (Test-Path "OptiScaler/x64/Release/a/Licenses") {
-            Copy-Item "OptiScaler/x64/Release/a/Licenses/*" -Destination "$dist/Licenses" -Recurse
-          }
+          if [ -d "extracted/Licenses" ]; then
+            cp -r extracted/Licenses/* "$DIST/Licenses/" 2>/dev/null || true
+          fi
 
           # Version tracking
-          $commit = git -C OptiScaler rev-parse --short HEAD
-          $version = "OptiScaler $commit"
-          Set-Content -Path "$dist/version" -Value $version
+          echo "OptiScaler ${EDGE_TAG}" > "$DIST/version"
 
           # Create tarball
-          tar -czf optiscaler-dist.tar.gz -C $dist .
+          tar -czf optiscaler-dist.tar.gz -C "$DIST" .
 
-          Write-Output "Distribution packaged successfully"
-          Get-ChildItem -Recurse $dist | ForEach-Object { Write-Output $_.FullName }
+          echo ""
+          echo "Distribution packaged successfully:"
+          find "$DIST" -type f | sort
 
       - name: Upload artifact
         uses: actions/upload-artifact@v5
